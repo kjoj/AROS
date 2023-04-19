@@ -574,11 +574,9 @@ static AROS_INTH1(APICResetHandler, struct KernelBase *, KernelBase)
 
     if ((KrnIsSuper()) || ((ssp = SuperState()) != NULL))
     {
+        /* Cause the heartbeat to fire its last time .. */
         IPTR __APICBase = core_APIC_GetBase();
-        D(bug("[Kernel:APIC] %s(0x%p)\n", __func__, KernelBase);)
-        /* disable heartbeat timer */
-        APIC_REG(__APICBase, APIC_TIMER_VEC) = 0xFF;
-        APIC_REG(__APICBase, APIC_TIMER_ICR) = 0x10000;
+        APIC_REG(__APICBase, APIC_TIMER_ICR) = 0x0;
 
         if (ssp)
             UserState(ssp);
@@ -586,9 +584,20 @@ static AROS_INTH1(APICResetHandler, struct KernelBase *, KernelBase)
 
     KrnSti();
     KrnCli();
+
+    if ((KrnIsSuper()) || ((ssp = SuperState()) != NULL))
+    {
+        /* Now disable heartbeat timer */
+        IPTR __APICBase = core_APIC_GetBase();
+        APIC_REG(__APICBase, APIC_TIMER_VEC) = 0xFF;
+
+        if (ssp)
+            UserState(ssp);
+    }
+
     Permit();
 
-    bug("[Kernel:APIC] %s: Timer shutdown complete\n", __func__);
+    D(bug("[Kernel:APIC] %s: Timer shutdown complete\n", __func__);)
     
     return 0;
 
@@ -853,8 +862,8 @@ void core_APIC_Init(struct APICData *apic, apicid_t cpuNum)
 
             for (i = X86_CPU_EXCEPT_COUNT; i < APIC_EXCEPT_TOP; i++)
             {
-                if ((cpuNum == 0) &&
-                    ((i == APIC_EXCEPT_SYSCALL)||(i == APIC_EXCEPT_HEARTBEAT)||(i == APIC_EXCEPT_SPURIOUS)))
+                if ((i == APIC_EXCEPT_SYSCALL) ||
+                    ((cpuNum == 0) && ((i == APIC_EXCEPT_HEARTBEAT)||(i == APIC_EXCEPT_SPURIOUS))))
                     continue;
 
                 if (!core_SetIDTGate((x86vectgate_t *)apic->cores[cpuNum].cpu_IDT,

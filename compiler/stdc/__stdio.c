@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 2010-2021, The AROS Development Team. All rights reserved.
+    Copyright (C) 2010-2023, The AROS Development Team. All rights reserved.
 
     Setup and support code for stdio.h functionality
 */
@@ -21,11 +21,16 @@
 /* For each opener stdin, stdout and stderr may be different */
 static int __init_stdio(struct StdCIOIntBase *StdCIOBase)
 {
+    struct FileHandle *_fh;
     struct Process *me = (struct Process *)FindTask(NULL);
 
     NewList((struct List *)&StdCIOBase->files);
 
-    StdCIOBase->intstdin.fh = Input();
+    if ((StdCIOBase->intstdin.fh = Input()))
+    {
+        _fh = BADDR(StdCIOBase->intstdin.fh);
+        StdCIOBase->intstdin.fhFlags = _fh->fh_Flags;
+    }
     StdCIOBase->intstdin.flags =
         __STDCIO_STDIO_READ
         | __STDCIO_STDIO_DONTCLOSE
@@ -34,7 +39,11 @@ static int __init_stdio(struct StdCIOIntBase *StdCIOBase)
     D(bug("[%s] %s: intstdin.fh = 0x%p\n", STDCNAME, __func__, StdCIOBase->intstdin.fh));
     StdCIOBase->StdCIOBase._stdin = &StdCIOBase->intstdin;
 
-    StdCIOBase->intstdout.fh = Output();
+    if ((StdCIOBase->intstdout.fh = Output()))
+    {
+        _fh = BADDR(StdCIOBase->intstdout.fh);
+        StdCIOBase->intstdout.fhFlags = _fh->fh_Flags;
+    }
     StdCIOBase->intstdout.flags =
         __STDCIO_STDIO_WRITE
         | __STDCIO_STDIO_DONTCLOSE
@@ -56,9 +65,22 @@ static int __init_stdio(struct StdCIOIntBase *StdCIOBase)
 
 static int __close_stdio(struct StdCIOIntBase *StdCIOBase)
 {
+    struct FileHandle *_fh;
     FILE *stream;
 
     D(bug("[%s] %s: StdCIOBase = 0x%p, DOSBase = 0x%p\n", STDCNAME, __func__, StdCIOBase, DOSBase));
+
+    if (StdCIOBase->intstdout.fh)
+    {
+        _fh = BADDR(StdCIOBase->intstdout.fh);
+        _fh->fh_Flags = StdCIOBase->intstdout.fhFlags;
+    }
+
+    if (StdCIOBase->intstdin.fh)
+    {
+        _fh = BADDR(StdCIOBase->intstdin.fh);
+        _fh->fh_Flags = StdCIOBase->intstdin.fhFlags;
+    }
 
     ForeachNode(&StdCIOBase->files, stream)
     {

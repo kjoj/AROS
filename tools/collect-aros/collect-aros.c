@@ -1,5 +1,5 @@
 /*
-    Copyright (C) 1995-2020, The AROS Development Team. All rights reserved.
+    Copyright (C) 1995-2023, The AROS Development Team. All rights reserved.
 */
 
 #include <stdio.h>
@@ -27,6 +27,8 @@
 
 static char *ldscriptname, *tempoutput, *ld_name, *strip_name;
 static FILE *ldscriptfile;
+
+int have_gnunm = 0;
 
 static void exitfunc(void)
 {
@@ -66,17 +68,25 @@ static int set_os_and_abi(const char *file)
     return 0;
 }
 
+struct libentry
+{
+    int idx;
+    char *str;
+};
+
 int main(int argc, char *argv[])
 {
-    int cnt, i;
+    struct libentry llibs[argc];
+    struct libentry rellibs[argc];
     char *output, **ldargs;
+    char *do_verbose = NULL;
     /* incremental = 1 -> don't do final linking.
        incremental = 2 -> don't do final linking AND STILL produce symbol sets.  */
     int incremental = 0, ignore_undefined_symbols = 0;
     int strip_all   = 0;
-    char *do_verbose = NULL;
+    int cnt, i, libcnt = 0, relcnt = 0;
 
-    setnode *setlist = NULL, *liblist = NULL;
+    setnode *setlist = NULL, *liblist = NULL, *extralist = NULL;
 
     program_name = argv[0];
     ld_name = LD_NAME;
@@ -106,6 +116,23 @@ int main(int argc, char *argv[])
                 argv[cnt][2] = '\0';
             }
             else
+            /* linklib */
+            if (strncmp(&argv[cnt][1], "l", 1) == 0)
+            {
+                int lnlen = strlen(&argv[cnt][2]);
+                if ((lnlen > 4) && (strcmp("_rel", &argv[cnt][lnlen - 2]) == 0))
+                {
+                    rellibs[relcnt].idx = cnt;
+                    rellibs[relcnt++].str = &argv[cnt][2];
+                }
+                else
+                {
+                    llibs[libcnt].idx = cnt;
+                    llibs[libcnt++].str = &argv[cnt][2];
+                }
+            }
+            else
+            /* Complete stripping is requested, but we do it our own way */
             /* Ignoring of missing symbols is requested */
             if (strncmp(&argv[cnt][1], "ius", 4) == 0)
             {
@@ -138,7 +165,7 @@ int main(int argc, char *argv[])
             }
         }
     }
-
+  
     ldargs = xmalloc(sizeof(char *) * (argc + EXTRA_ARG_CNT
         + ((incremental == 1) ? 0 : 2) + 1));
 
@@ -167,6 +194,21 @@ int main(int argc, char *argv[])
         ldargs[cnt++] = tempoutput;
     }
 
+    // Fixup relbase lib linking 
+    if (relcnt > 0)
+    {
+        int relid, libid;
+        for (relid = 0; relid < relcnt; relid++)
+            for (libid = 0; libid < libcnt; libid++)
+            {
+                if (!strncmp(llibs[libid].str, rellibs[relid].str, strlen(llibs[libid].str)))
+                {
+                    ldargs[llibs[libid].idx + EXTRA_ARG_CNT] = ldargs[rellibs[relid].idx + EXTRA_ARG_CNT];
+                }
+            }
+    }
+  
+    
     ldargs[cnt] = NULL;
               
     docommandvp(ld_name, ldargs);
@@ -174,8 +216,14 @@ int main(int argc, char *argv[])
     if (incremental == 1)
         return set_os_and_abi(output) ? EXIT_SUCCESS : EXIT_FAILURE;
 
-    collect_libs(tempoutput, &liblist);
+    /*
+       * initalize the backend and process the 
+       * remaining work
+       */
+    backend_init(ldargs[0]);
     collect_sets(tempoutput, &setlist);
+    collect_extra(tempoutput, &extralist);
+    collect_libs(tempoutput, &liblist);
 
     if (setlist) {
         struct setnode *n;
@@ -198,34 +246,144 @@ int main(int argc, char *argv[])
 
     fclose(ldscriptfile);
     ldscriptfile = NULL;
+    
+    char **cmdargv;
+    int argallocs = 0;
+    if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            argallocs += 1;
+    }
 
 #ifdef TARGET_FORMAT_EXE
     if (incremental == 0)
     {
 #ifdef OBJECT_FORMAT_EXTRA_FINAL
-        docommandlp(ld_name, ld_name, OBJECT_FORMAT, OBJECT_FORMAT_EXTRA_FINAL, "-o", output,
-            tempoutput, "-T", ldscriptname, do_verbose, NULL);
+        argallocs += 10;
+        cmdargv = xmalloc(sizeof(char *) * (argallocs + 1));
+        cmdargv[0] = ld_name;
+        cmdargv[1] = OBJECT_FORMAT;
+        cmdargv[2] = OBJECT_FORMAT_EXTRA_FINAL;
+        cmdargv[3] = "-o";
+        cmdargv[4] = output;
+        cmdargv[5] = tempoutput;
+
+        cnt = 0;
+        if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            cmdargv[6 + cnt++] = n->secname;
+        }
+    
+        cmdargv[6 + cnt] = "-T";
+        cmdargv[7 + cnt] = ldscriptname;
+        cmdargv[8 + cnt] = do_verbose;
+        cmdargv[9 + cnt] = NULL;
+
+        docommandvp(ld_name, cmdargv);
 #else
-        docommandlp(ld_name, ld_name, OBJECT_FORMAT, "-o", output,
-            tempoutput, "-T", ldscriptname, do_verbose, NULL);
+        argallocs += 9;
+        cmdargv = xmalloc(sizeof(char *) * (argallocs + 1));
+        cmdargv[0] = ld_name;
+        cmdargv[1] = OBJECT_FORMAT;
+        cmdargv[2] = "-o";
+        cmdargv[3] = output;
+        cmdargv[4] = tempoutput;
+        
+        cnt = 0;
+        if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            cmdargv[6 + cnt++] = n->secname;
+        }
+    
+        cmdargv[5 + cnt] = "-T";
+        cmdargv[6 + cnt] = ldscriptname;
+        cmdargv[7 + cnt] = do_verbose;
+        cmdargv[8 + cnt] = NULL;
+
+        docommandvp(ld_name, cmdargv);
 #endif
     }
     else
     {
-        docommandlp(ld_name, ld_name, OBJECT_FORMAT, "-r", "-o", output,
-            tempoutput, "-T", ldscriptname, do_verbose, NULL);
+        argallocs += 10;
+        cmdargv = xmalloc(sizeof(char *) * (argallocs + 1));
+        cmdargv[0] = ld_name;
+        cmdargv[1] = OBJECT_FORMAT;
+        cmdargv[2] = "-r";
+        cmdargv[3] = "-o";
+        cmdargv[4] = output;
+        cmdargv[5] = tempoutput;
+
+        cnt = 0;
+        if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            cmdargv[6 + cnt++] = n->secname;
+        }
+    
+        cmdargv[6 + cnt] = "-T";
+        cmdargv[7 + cnt] = ldscriptname;
+        cmdargv[8 + cnt] = do_verbose;
+        cmdargv[9 + cnt] = NULL;
+
+        docommandvp(ld_name, cmdargv);
     }
 #else
 #ifdef OBJECT_FORMAT_EXTRA_FINAL
     if (incremental == 0)
     {
-        docommandlp(ld_name, ld_name, OBJECT_FORMAT, OBJECT_FORMAT_EXTRA_FINAL, "-r", "-o", output,
-            tempoutput, "-T", ldscriptname, do_verbose, NULL);
+        argallocs += 11;
+        cmdargv = xmalloc(sizeof(char *) * (argallocs + 1));
+        cmdargv[0] = ld_name;
+        cmdargv[1] = OBJECT_FORMAT;
+        cmdargv[2] = OBJECT_FORMAT_EXTRA_FINAL;
+        cmdargv[3] = "-r";
+        cmdargv[4] = "-o";
+        cmdargv[5] = output;
+        cmdargv[6] = tempoutput;
+        
+        cnt = 0;
+        if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            cmdargv[6 + cnt++] = n->secname;
+        }
+    
+        cmdargv[7 + cnt] = "-T";
+        cmdargv[8 + cnt] = ldscriptname;
+        cmdargv[9 + cnt] = do_verbose;
+        cmdargv[10 + cnt] = NULL;
+
+        docommandvp(ld_name, cmdargv);
     }
     else
 #endif
-    docommandlp(ld_name, ld_name, OBJECT_FORMAT, "-r", "-o", output,
-        tempoutput, "-T", ldscriptname, do_verbose, NULL);
+    {
+        argallocs += 10;
+        cmdargv = xmalloc(sizeof(char *) * (argallocs + 1));
+        cmdargv[0] = ld_name;
+        cmdargv[1] = OBJECT_FORMAT;
+        cmdargv[2] = "-r";
+        cmdargv[3] = "-o";
+        cmdargv[4] = output;
+        cmdargv[5] = tempoutput;
+
+        cnt = 0;
+        if (extralist) {
+        struct setnode *n;
+        for (n = extralist; n; n = n->next)
+            cmdargv[6 + cnt++] = n->secname;
+        }
+    
+        cmdargv[6 + cnt] = "-T";
+        cmdargv[7 + cnt] = ldscriptname;
+        cmdargv[8 + cnt] = do_verbose;
+        cmdargv[9 + cnt] = NULL;
+
+        docommandvp(ld_name, cmdargv);
+    }
 #endif
 
     if (incremental != 0)
